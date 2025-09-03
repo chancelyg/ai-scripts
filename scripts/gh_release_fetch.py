@@ -80,8 +80,21 @@ def build_headers() -> dict:
     headers = {"Accept": "application/vnd.github+json"}
     token = os.getenv("GITHUB_TOKEN")
     if token:
+        logging.info(f"Using GitHub token: {token[:4]}...{token[-4:]}")
         headers["Authorization"] = f"Bearer {token}"
     return headers
+
+
+def build_proxy_config() -> str | None:
+    """Build proxy configuration from environment variables."""
+    # httpx automatically respects HTTP_PROXY and HTTPS_PROXY environment variables
+    # But we can also explicitly set a proxy if needed
+    http_proxy = os.getenv("HTTP_PROXY") or os.getenv("http_proxy")
+    https_proxy = os.getenv("HTTPS_PROXY") or os.getenv("https_proxy")
+    
+    # For GitHub API, we typically use HTTPS, so prioritize HTTPS proxy
+    proxy = https_proxy or http_proxy
+    return proxy
 
 
 def load_existing_manifest(path: Path) -> List[dict]:
@@ -390,8 +403,15 @@ def main(argv: List[str] | None = None) -> int:
     logging.info("Repo=%s tags=%s force_latest=%s dest=%s", repo, args.tags, args.force_latest, download_dir)
 
     headers = build_headers()
+    proxy = build_proxy_config()
     transport = httpx.HTTPTransport(retries=3)
-    with httpx.Client(headers=headers, transport=transport) as client:
+    
+    client_kwargs = {"headers": headers, "transport": transport}
+    if proxy:
+        logging.info("Using proxy: %s", proxy)
+        client_kwargs["proxy"] = proxy
+    
+    with httpx.Client(**client_kwargs) as client:
         try:
             records = process_specified_tags(
                 client=client,
