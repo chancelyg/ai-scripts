@@ -242,7 +242,7 @@ def process_release_assets(
     
     logging.info("Processing release tag=%s id=%s", tag, rel_id)
     
-    rel_dir = download_dir / repo.replace("/", "_") / tag
+    rel_dir = download_dir / repo.split("/")[0] / repo.split("/")[1] / tag
     assets = release.get("assets") or []
     
     if not assets:
