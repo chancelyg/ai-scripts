@@ -1,13 +1,20 @@
 # ai-scripts
-A collection of one-off, AI‑generated scripts for quick, practical automation tasks. / 一系列一次性、由AI生成的脚本，用于快速完成实用的自动化任务。
+
+本仓库收集一系列日常常用的自动化脚本，全部由多个 ai 开发，并经过人工审核和测试，力求实用和可靠
+
+每个脚本都可单独运行，单独使用，采用传参方式来控制，推荐使用 `uv` 直接运行，例如拉取仓库 Releases：
+
+```bash
+uv run --with httpx --with ruff gh_release_fetch.py --repo https://github.com/fatedier/frp --tags latest
+```
 
 # 使用指南
 
-推荐直接使用 uv 单次运行目标功能的 py 文件，库中的每一个 py 文件都为此做了适配
+## Github Releases 拉取
 
-## Github Releases 自动拉取
+文件：**gh_release_fetch.py**
 
-文件：gh_release_fetch.py
+该脚本用于拉取指定 GitHub 仓库的发布版本资源，并进行哈希验证。
 
 运行方式
 
@@ -15,28 +22,15 @@ A collection of one-off, AI‑generated scripts for quick, practical automation 
 uv run --with httpx --with ruff gh_release_fetch.py --repo https://github.com/fatedier/frp --tags latest
 ```
 
-# 详细功能说明
-## gh_release_fetch.py
-下载指定 GitHub 发布版本资源并进行哈希验证。
-
-功能: 
+功能说明: 
 - 支持指定多个 `--tags` 下载特定发布版本，支持 `latest` 标签表示最新版本
 - 使用 `latest` 标签时自动检测最新版本是否有更新，有更新则重新下载
 - 流式下载 + 双重 SHA256 校验，生成 `<文件名>.sha256`
 - 维护 `release_manifest.json`：记录资产元数据与 hash（幂等追加）
 - 支持 `GITHUB_TOKEN` (环境变量) 以提升速率限制
 
-依赖安装 (使用 uv):
-```
-uv sync
-```
-
-基础用法:
-```
-python gh_release_fetch.py --repo owner/name --tags latest
-```
-
 参数说明:
+
 ```
 --repo          必填，GitHub 仓库（owner/name 或完整 URL）
 --tags          必填，要下载的发布版本标签，支持多个。使用 'latest' 表示最新版本。
@@ -60,34 +54,6 @@ python gh_release_fetch.py --repo psf/requests --tags latest --force-latest
 
 # 使用完整仓库 URL
 python gh_release_fetch.py --repo https://github.com/psf/requests --tags latest
-```
-
-输出结构 (示例):
-```
-downloads/
-	release_manifest.json
-	psf_requests/
-		v2.32.3/
-			requests.tar.gz
-			requests.tar.gz.sha256
-```
-
-`release_manifest.json` 字段:
-```
-[
-	{
-		"repo": "psf/requests",
-		"release_tag": "v2.32.3",
-		"release_id": 123456,
-		"asset_id": 987654,
-		"asset_name": "requests.tar.gz",
-		"size": 12345,
-		"download_url": "https://github.com/...",
-		"hash_algo": "sha256",
-		"hash_value": "<sha256>",
-		"path": "/abs/path/.../requests.tar.gz"
-	}
-]
 ```
 
 注意:
