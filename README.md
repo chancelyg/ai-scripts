@@ -68,6 +68,69 @@ python gh_release_fetch.py --repo https://github.com/psf/requests --tags latest
 - 校验失败会报错并跳过该资产，不会写入 manifest。
 - 建议设置 `export GITHUB_TOKEN=xxxx` 以避免速率限制。
 
+## PT 站点自动化浏览器
+
+文件：**scripts/pt_browser_automation.py**
+
+该脚本使用 Playwright 同步 API 自动访问多个 PT 站点，检查登录状态并执行相关操作，最后通过 ntfy 发送报告。
+
+### 功能说明
+- 使用指定的 user_data 目录启动浏览器实例（同步模式，支持保持登录状态）。
+- 访问 hdtime.org 并检查登录状态，若已登录则访问签到页面。
+- 访问 haidan.video 并检查登录状态，若已登录则点击签到按钮。
+- 访问 kp.m-team.cc/index 页面并等待加载完成。
+- 记录所有操作详情，并通过 ntfy 发送结果报告到指定频道。
+
+### 运行方式
+
+首次使用需要安装 Playwright 浏览器：
+
+```bash
+uv run playwright install chromium
+```
+
+运行脚本：
+
+```bash
+uv run scripts/pt_browser_automation.py --user-data-dir /path/to/user_data
+```
+
+或使用环境变量：
+
+```bash
+export PT_USER_DATA_DIR=/path/to/user_data
+uv run scripts/pt_browser_automation.py
+```
+
+### 参数说明
+
+```
+--user-data-dir     浏览器用户数据目录路径（必填），对应环境变量 PT_USER_DATA_DIR。
+--ntfy-url          ntfy 通知服务 URL，默认 https://ntfy.chancel.me/signal，对应环境变量 PT_NTFY_URL。
+--log-level         日志级别，默认 INFO，对应环境变量 PT_LOG_LEVEL。
+--headed            使用有头模式（默认为无头模式），对应环境变量 PT_HEADLESS（true/false）。
+--timeout           页面加载超时时间（毫秒），默认 30000，对应环境变量 PT_TIMEOUT_MS。
+--browser-type      浏览器类型（chromium/firefox/webkit），默认 chromium，对应环境变量 PT_BROWSER_TYPE。
+```
+
+### 登录检测机制
+- **检测方式**：检测页面中是否包含用户名 `chancel`，包含则视为已登录。
+- **未登录处理**：
+  - **无头模式**（默认）：直接标记为失败并跳过该站点。
+  - **有头模式**（使用 `--headed`）：等待最多 180 秒供用户手动登录，每 10 秒检测一次登录状态。
+
+### 运行逻辑
+1. **HDTime (hdtime.org)**：访问首页检查是否包含用户名 "chancel"，若已登录则访问 attendance.php 签到页面；未登录时根据模式决定是否等待手动登录。
+2. **海胆 (haidan.video)**：访问首页检查是否包含用户名 "chancel"，若已登录则点击 ID 为 `modalBtn` 的按钮；未登录时根据模式决定是否等待手动登录。
+3. **M-Team (kp.m-team.cc/index)**：访问首页检查是否包含用户名 "chancel"，若已登录则正常加载；未登录时根据模式决定是否等待手动登录。
+4. **报告发送**：将所有站点的访问结果（成功/失败、登录状态、错误信息）汇总成报告，通过 ntfy 发送到指定频道。
+
+### 注意事项
+- user_data 目录用于保持浏览器登录状态，建议首次运行时使用 `--headed` 模式手动登录各站点。
+- 默认为无头模式，适合自动化定时任务；调试或首次登录时建议使用 `--headed` 参数。
+- 在有头模式下，如果检测到未登录，脚本会暂停最多 180 秒等待手动登录。
+- ntfy 通知需要网络连接，如发送失败会在日志中记录错误。
+
 ## Telegram 消息归档
 
 文件：**scripts/telegram_message_archiver.py**
