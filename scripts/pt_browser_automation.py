@@ -5,28 +5,33 @@ PT 站点自动化浏览器脚本
 使用 Playwright 同步 API 自动访问多个 PT 站点，检查登录状态并执行相关操作，最后通过 ntfy 发送报告。
 
 功能说明:
-- 使用指定的 user_data 目录启动浏览器实例（同步模式）。
+- 使用指定的 state.json 文件启动浏览器实例（同步模式）。
 - 访问 hdtime.org 并检查登录状态，登录时访问签到页面。
 - 访问 haidan.video 并检查登录状态，登录时点击签到按钮。
 - 访问 kp.m-team.cc/index 页面。
+- 访问 v2ex.com 并领取每日铜币。
 - 记录所有操作详情，并通过 ntfy 发送结果报告。
+- 支持守护进程模式，定时执行签到任务。
 
 用法:
-    python pt_browser_automation.py --user-data-dir /path/to/user_data
-    python pt_browser_automation.py --user-data-dir /path/to/user_data --ntfy-url https://ntfy.chancel.me/signal
+    python pt_browser_automation.py --headed  # 有头模式，登录并保存状态
+    python pt_browser_automation.py  # 无头模式，执行一次签到
+    python pt_browser_automation.py --daemon  # 守护进程模式，定时执行签到
 
 环境变量:
-    PT_USER_DATA_DIR: 浏览器用户数据目录
+    PT_STATE_FILE: 浏览器状态文件路径，默认 .state.json
+    PT_USER_DATA_DIR: 浏览器用户数据目录（仅有头模式），默认 .browser_data
     PT_NTFY_URL: ntfy 通知服务 URL，默认 https://ntfy.chancel.me/signal
     PT_LOG_LEVEL: 日志级别，默认 INFO
     PT_HEADLESS: 是否无头模式，默认 true
     PT_TIMEOUT_MS: 页面加载超时时间（毫秒），默认 30000
 
-登录检测逻辑:
-    - 检测页面中是否包含用户名 "chancel"，包含则视为已登录
-    - 未登录时：无头模式直接失败；有头模式等待 180 秒供手动登录（每 10 秒检测一次）
+守护进程模式:
+    - 启动时立即执行一次签到
+    - 记录首次执行时间，之后每天在相同时刻执行
+    - 使用 schedule 库进行任务调度
 
-依赖: Python 3.12+, playwright
+依赖: Python 3.12+, playwright, httpx, schedule
 """
 
 from __future__ import annotations
@@ -41,6 +46,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import httpx
+import schedule
 from playwright.sync_api import sync_playwright, Browser, Page, TimeoutError as PlaywrightTimeout
 
 # ============================= Constants & Defaults =============================
@@ -102,6 +108,7 @@ class Config:
     headless: bool
     timeout_ms: int
     browser_type: str
+    daemon: bool
 
 
 @dataclass(slots=True)
@@ -125,7 +132,8 @@ def build_parser() -> argparse.ArgumentParser:
         epilog="""
 示例:
   %(prog)s --headed  # 有头模式，用于首次登录并保存状态
-  %(prog)s  # 无头模式，使用保存的状态执行自动化
+  %(prog)s  # 无头模式，使用保存的状态执行一次自动化
+  %(prog)s --daemon  # 守护进程模式，定时执行签到
   %(prog)s --state-file /path/to/state.json
   %(prog)s --ntfy-url https://ntfy.chancel.me/signal
         """
@@ -136,6 +144,8 @@ def build_parser() -> argparse.ArgumentParser:
                        help=f"日志级别 (默认: {DEFAULT_LOG_LEVEL})")
     parser.add_argument("--headed", action="store_true",
                        help="使用有头模式，用于登录并保存状态 (默认: 无头模式)")
+    parser.add_argument("--daemon", action="store_true",
+                       help="守护进程模式，定时执行签到任务")
     parser.add_argument("--timeout", type=int,
                        help=f"页面加载超时时间（毫秒）(默认: {DEFAULT_TIMEOUT_MS})")
     parser.add_argument("--browser-type", choices=["chromium", "firefox", "webkit"],
@@ -162,6 +172,7 @@ def resolve_config(args: argparse.Namespace) -> Config:
     
     timeout_ms = args.timeout or int(os.getenv("PT_TIMEOUT_MS", DEFAULT_TIMEOUT_MS))
     browser_type = args.browser_type or os.getenv("PT_BROWSER_TYPE", DEFAULT_BROWSER_TYPE)
+    daemon = args.daemon
     
     return Config(
         state_file=state_file,
@@ -170,6 +181,7 @@ def resolve_config(args: argparse.Namespace) -> Config:
         headless=headless,
         timeout_ms=timeout_ms,
         browser_type=browser_type,
+        daemon=daemon,
     )
 
 
@@ -687,6 +699,52 @@ def run_automation(config: Config) -> int:
                 browser.close()
 
 
+def run_scheduled_task(config: Config) -> None:
+    """运行定时任务（守护进程模式）。"""
+    logging.info("🔄 开始执行定时签到任务...")
+    try:
+        exit_code = run_automation(config)
+        if exit_code == 0:
+            logging.info("✅ 定时任务执行成功")
+        else:
+            logging.warning("⚠️ 定时任务执行完成，但存在错误 (exit_code=%d)", exit_code)
+    except Exception as exc:
+        logging.exception("❌ 定时任务执行失败: %s", exc)
+
+
+def run_daemon_mode(config: Config) -> int:
+    """运行守护进程模式，定时执行签到。"""
+    logging.info("=" * 60)
+    logging.info("🤖 守护进程模式启动")
+    logging.info("=" * 60)
+    
+    # 立即执行一次
+    logging.info("⚡ 首次执行签到任务...")
+    first_run_time = datetime.now()
+    run_scheduled_task(config)
+    
+    # 计算下次执行时间（明天的同一时刻）
+    schedule_time = first_run_time.strftime("%H:%M")
+    logging.info("")
+    logging.info("📅 定时任务已设置：每天 %s 执行", schedule_time)
+    logging.info("⏰ 下次执行时间：明天 %s", schedule_time)
+    logging.info("💡 提示：按 Ctrl+C 停止守护进程")
+    logging.info("=" * 60)
+    
+    # 设置每日定时任务
+    schedule.every().day.at(schedule_time).do(run_scheduled_task, config)
+    
+    # 主循环
+    try:
+        while True:
+            schedule.run_pending()
+            time.sleep(60)  # 每分钟检查一次
+    except KeyboardInterrupt:
+        logging.info("")
+        logging.info("🛑 收到停止信号，守护进程退出")
+        return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     """Main application entry point."""
     parser = build_parser()
@@ -701,7 +759,16 @@ def main(argv: list[str] | None = None) -> int:
     configure_logging(config.log_level)
     
     try:
+        # 守护进程模式
+        if config.daemon:
+            if not config.headless:
+                logging.error("守护进程模式不支持有头模式，请移除 --headed 参数")
+                return 2
+            return run_daemon_mode(config)
+        
+        # 普通模式（单次执行）
         return run_automation(config)
+        
     except KeyboardInterrupt:
         logging.info("🛑 收到中断信号，退出...")
         return 130
