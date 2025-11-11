@@ -211,5 +211,6 @@ __marimo__/
 *.session
 
 # Other files to ignore
-cache/
+.browser_data/
+.state.json
 

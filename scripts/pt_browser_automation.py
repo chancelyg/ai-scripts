@@ -35,6 +35,7 @@ import argparse
 import logging
 import os
 import sys
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -44,25 +45,50 @@ from playwright.sync_api import sync_playwright, Browser, Page, TimeoutError as 
 
 # ============================= Constants & Defaults =============================
 
-DEFAULT_USER_DATA_DIR = "browser_data"
+DEFAULT_STATE_FILE = ".state.json"
+DEFAULT_USER_DATA_DIR = ".browser_data"
 DEFAULT_NTFY_URL = "https://ntfy.chancel.me/signal"
 DEFAULT_LOG_LEVEL = "INFO"
 DEFAULT_HEADLESS = True
 DEFAULT_TIMEOUT_MS = 30000
 DEFAULT_BROWSER_TYPE = "chromium"
-LOGIN_CHECK_KEYWORD = "chancel"
 LOGIN_WAIT_TIMEOUT_SEC = 180
 LOGIN_CHECK_INTERVAL_SEC = 10
 
 LOG_FORMAT = "%(asctime)s | %(levelname)s | %(message)s"
 LOG_DATEFMT = "%Y-%m-%d %H:%M:%S"
 
-HDTIME_URL = "https://hdtime.org"
-HDTIME_ATTENDANCE_URL = "https://hdtime.org/attendance.php"
-HAIDAN_URL = "https://www.haidan.video"
-MTEAM_URL = "https://kp.m-team.cc/index"
-
-HAIDAN_BUTTON_ID = "modalBtn"
+# 站点配置：统一数据结构
+SITES = [
+    {
+        "name": "HDTime",
+        "url": "https://hdtime.org",
+        "username": "chancel",
+        "action": "visit_attendance",
+        "attendance_url": "https://hdtime.org/attendance.php",
+    },
+    {
+        "name": "海胆",
+        "url": "https://www.haidan.video",
+        "username": "chancel",
+        "action": "click_button",
+        "button_id": "modalBtn",
+        "checked_text": "已经打卡",
+    },
+    {
+        "name": "M-Team",
+        "url": "https://kp.m-team.cc/index",
+        "username": "chancel",
+        "action": "visit_only",
+    },
+    {
+        "name": "V2EX",
+        "url": "https://www.v2ex.com",
+        "username": "Chancel",
+        "action": "v2ex_daily_mission",
+        "mission_url": "https://www.v2ex.com/mission/daily",
+    },
+]
 
 
 # ================================ Data Models ==================================
@@ -70,7 +96,7 @@ HAIDAN_BUTTON_ID = "modalBtn"
 @dataclass(slots=True)
 class Config:
     """Application configuration container."""
-    user_data_dir: Path
+    state_file: Path
     ntfy_url: str
     log_level: str
     headless: bool
@@ -98,17 +124,18 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例:
-  %(prog)s --user-data-dir /path/to/user_data
-  %(prog)s --user-data-dir /path/to/user_data --ntfy-url https://ntfy.chancel.me/signal
-  %(prog)s --user-data-dir /path/to/user_data --headed
+  %(prog)s --headed  # 有头模式，用于首次登录并保存状态
+  %(prog)s  # 无头模式，使用保存的状态执行自动化
+  %(prog)s --state-file /path/to/state.json
+  %(prog)s --ntfy-url https://ntfy.chancel.me/signal
         """
     )
-    parser.add_argument("--user-data-dir", help="浏览器用户数据目录路径")
+    parser.add_argument("--state-file", help=f"浏览器状态文件路径 (默认: {DEFAULT_STATE_FILE})")
     parser.add_argument("--ntfy-url", help=f"ntfy 通知服务 URL (默认: {DEFAULT_NTFY_URL})")
     parser.add_argument("--log-level", choices=["DEBUG", "INFO", "WARNING", "ERROR"],
                        help=f"日志级别 (默认: {DEFAULT_LOG_LEVEL})")
     parser.add_argument("--headed", action="store_true",
-                       help="使用有头模式 (默认: 无头模式)")
+                       help="使用有头模式，用于登录并保存状态 (默认: 无头模式)")
     parser.add_argument("--timeout", type=int,
                        help=f"页面加载超时时间（毫秒）(默认: {DEFAULT_TIMEOUT_MS})")
     parser.add_argument("--browser-type", choices=["chromium", "firefox", "webkit"],
@@ -118,13 +145,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 def resolve_config(args: argparse.Namespace) -> Config:
     """Resolve configuration from arguments and environment variables."""
-    user_data_dir_str = args.user_data_dir or os.getenv("PT_USER_DATA_DIR")
-    if not user_data_dir_str:
-        raise ValueError(
-            "必须指定浏览器用户数据目录。使用 --user-data-dir 参数或设置 PT_USER_DATA_DIR 环境变量。"
-        )
-    
-    user_data_dir = Path(user_data_dir_str).expanduser().resolve()
+    state_file_str = args.state_file or os.getenv("PT_STATE_FILE", DEFAULT_STATE_FILE)
+    state_file = Path(state_file_str).expanduser().resolve()
     
     ntfy_url = args.ntfy_url or os.getenv("PT_NTFY_URL", DEFAULT_NTFY_URL)
     log_level = (args.log_level or os.getenv("PT_LOG_LEVEL", DEFAULT_LOG_LEVEL)).upper()
@@ -142,7 +164,7 @@ def resolve_config(args: argparse.Namespace) -> Config:
     browser_type = args.browser_type or os.getenv("PT_BROWSER_TYPE", DEFAULT_BROWSER_TYPE)
     
     return Config(
-        user_data_dir=user_data_dir,
+        state_file=state_file,
         ntfy_url=ntfy_url,
         log_level=log_level,
         headless=headless,
@@ -162,11 +184,11 @@ def configure_logging(log_level: str) -> None:
 
 # ============================= Browser Operations ===============================
 
-def check_login_status(page: Page) -> bool:
+def check_login_status(page: Page, username: str) -> bool:
     """Check if user is logged in by looking for username keyword."""
     try:
         page_content = page.content()
-        return LOGIN_CHECK_KEYWORD in page_content
+        return username in page_content
     except Exception as exc:
         logging.warning("检查登录状态时出错: %s", exc)
         return False
@@ -197,76 +219,169 @@ def wait_for_manual_login(page: Page, site_name: str, headless: bool) -> bool:
     return False
 
 
-def launch_browser(config: Config, playwright) -> Browser:
-    """Launch browser with user data directory."""
-    logging.info("启动浏览器 (类型=%s, headless=%s, user_data=%s)",
-                 config.browser_type, config.headless, config.user_data_dir)
-    
-    # Ensure user data directory exists
-    config.user_data_dir.mkdir(parents=True, exist_ok=True)
-    
-    # Get browser type
+def launch_browser_and_context(config: Config, playwright):
+    """Launch browser and create context with optional storage state.
+
+    - Headed: use persistent user_data_dir (from PT_USER_DATA_DIR or DEFAULT_USER_DATA_DIR)
+    - Headless: launch browser + new_context and load storage_state from state_file if present
+    """
+    logging.info("启动浏览器 (类型=%s, headless=%s)", config.browser_type, config.headless)
+
     browser_launcher = getattr(playwright, config.browser_type)
-    
-    # Launch persistent context with user data
-    context = browser_launcher.launch_persistent_context(
-        user_data_dir=str(config.user_data_dir),
+
+    # Headed: use persistent context with user data dir to allow manual login/export
+    if not config.headless:
+        user_data_dir_str = os.getenv("PT_USER_DATA_DIR", DEFAULT_USER_DATA_DIR)
+        user_data_dir = Path(user_data_dir_str).expanduser().resolve()
+        user_data_dir.mkdir(parents=True, exist_ok=True)
+        logging.info("使用持久用户数据目录启动浏览器: %s", user_data_dir)
+
+        context = browser_launcher.launch_persistent_context(
+            user_data_dir=str(user_data_dir),
+            headless=config.headless,
+            args=['--disable-blink-features=AutomationControlled'],
+        )
+        logging.info("浏览器（持久上下文）启动成功")
+        return None, context
+
+    # Headless: regular browser + context, optionally load storage_state
+    browser = browser_launcher.launch(
         headless=config.headless,
-        args=[
-            '--disable-blink-features=AutomationControlled',
-        ],
+        args=['--disable-blink-features=AutomationControlled'],
     )
-    
+
+    context_options = {}
+    if config.headless and config.state_file.exists():
+        logging.info("加载浏览器状态: %s", config.state_file)
+        context_options["storage_state"] = str(config.state_file)
+
+    context = browser.new_context(**context_options)
     logging.info("浏览器启动成功")
-    return context
+    return browser, context
 
 
-def visit_hdtime(page: Page, timeout_ms: int, headless: bool) -> SiteResult:
-    """Visit hdtime.org and check login status."""
-    site_name = "HDTime"
+def run_login_mode(context, config: Config) -> int:
+    """Run in headed mode: wait for user to login and save state."""
+    logging.info("=" * 60)
+    logging.info("🌐 有头模式：请在浏览器中登录所有需要的网站")
+    logging.info("=" * 60)
+    logging.info("")
+    logging.info("建议访问以下网站并登录：")
+    for site in SITES:
+        logging.info("  - %s", site["url"])
+    logging.info("")
+    logging.info("登录完成后，请按回车键继续...")
+    logging.info("=" * 60)
+    
+    # Open first site
+    page = context.new_page()
+    page.goto(SITES[0]["url"], wait_until="domcontentloaded")
+    
+    # Wait for user input
     try:
-        logging.info("访问 %s...", HDTIME_URL)
-        page.goto(HDTIME_URL, timeout=timeout_ms, wait_until="domcontentloaded")
+        input()
+    except (EOFError, KeyboardInterrupt):
+        logging.info("收到中断信号")
+        return 130
+    
+    # Save storage state
+    logging.info("保存浏览器状态到: %s", config.state_file)
+    try:
+        # Ensure parent directory exists
+        config.state_file.parent.mkdir(parents=True, exist_ok=True)
+        context.storage_state(path=str(config.state_file))
+        logging.info("✅ 状态保存成功！")
+        logging.info("")
+        logging.info("现在你可以使用无头模式运行脚本：")
+        logging.info("  python %s", Path(__file__).name)
+        return 0
+    except Exception as exc:
+        logging.error("❌ 保存状态失败: %s", exc)
+        return 1
+
+
+def run_automation_mode(context, config: Config) -> list[SiteResult]:
+    """Run in headless mode: execute automation with saved state."""
+    results: list[SiteResult] = []
+    
+    try:
+        # Get or create page
+        if context.pages:
+            page = context.pages[0]
+        else:
+            page = context.new_page()
+        
+        # Visit each site
+        for site in SITES:
+            result = visit_site(page, site, config.timeout_ms)
+            results.append(result)
+        
+    except Exception as exc:
+        logging.exception("浏览器自动化执行失败: %s", exc)
+    
+    return results
+
+
+def visit_site(page: Page, site: dict, timeout_ms: int) -> SiteResult:
+    """通用站点访问函数，根据站点配置执行相应操作。"""
+    site_name = site["name"]
+    site_url = site["url"]
+    username = site["username"]
+    action = site["action"]
+    
+    try:
+        logging.info("访问 %s (%s)...", site_name, site_url)
+        page.goto(site_url, timeout=timeout_ms, wait_until="domcontentloaded")
         page.wait_for_load_state("networkidle", timeout=timeout_ms)
+        
+        time.sleep(10)  # 等待额外加载
         
         # Check if logged in
-        logged_in = check_login_status(page)
+        logged_in = check_login_status(page, username)
         
         if not logged_in:
-            logging.info("%s: 未登录", site_name)
-            # Wait for manual login if in headed mode
-            logged_in = wait_for_manual_login(page, site_name, headless)
-            
-            if not logged_in:
-                return SiteResult(
-                    site_name=site_name,
-                    url=HDTIME_URL,
-                    success=False if headless else True,
-                    logged_in=False,
-                    message="未登录" if headless else "等待登录超时",
-                    error="无头模式下无法登录" if headless else None,
-                )
+            logging.warning("%s: 未登录，状态文件可能已过期", site_name)
+            return SiteResult(
+                site_name=site_name,
+                url=site_url,
+                success=False,
+                logged_in=False,
+                message="未登录，请重新运行 --headed 模式更新状态",
+                error="登录状态已失效",
+            )
         
-        # Visit attendance page
-        logging.info("%s: 已登录，访问签到页面...", site_name)
-        page.goto(HDTIME_ATTENDANCE_URL, timeout=timeout_ms, wait_until="domcontentloaded")
-        page.wait_for_load_state("networkidle", timeout=timeout_ms)
-        
-        logging.info("%s: 签到页面访问成功", site_name)
-        return SiteResult(
-            site_name=site_name,
-            url=HDTIME_ATTENDANCE_URL,
-            success=True,
-            logged_in=True,
-            message="已登录，签到页面访问成功",
-        )
+        # Execute site-specific action
+        if action == "visit_attendance":
+            return _handle_attendance(page, site, timeout_ms)
+        elif action == "click_button":
+            return _handle_button_click(page, site, timeout_ms)
+        elif action == "v2ex_daily_mission":
+            return _handle_v2ex_daily_mission(page, site, timeout_ms)
+        elif action == "visit_only":
+            logging.info("%s: 已登录，页面加载成功", site_name)
+            return SiteResult(
+                site_name=site_name,
+                url=site_url,
+                success=True,
+                logged_in=True,
+                message="已登录，页面加载成功",
+            )
+        else:
+            logging.warning("%s: 未知操作类型: %s", site_name, action)
+            return SiteResult(
+                site_name=site_name,
+                url=site_url,
+                success=True,
+                logged_in=True,
+                message=f"已登录，但未知操作类型: {action}",
+            )
         
     except PlaywrightTimeout as exc:
         error_msg = f"页面加载超时: {exc}"
         logging.error("%s: %s", site_name, error_msg)
         return SiteResult(
             site_name=site_name,
-            url=HDTIME_URL,
+            url=site_url,
             success=False,
             logged_in=None,
             message="访问失败",
@@ -277,7 +392,7 @@ def visit_hdtime(page: Page, timeout_ms: int, headless: bool) -> SiteResult:
         logging.error("%s: %s", site_name, error_msg)
         return SiteResult(
             site_name=site_name,
-            url=HDTIME_URL,
+            url=site_url,
             success=False,
             logged_in=None,
             message="访问失败",
@@ -285,36 +400,80 @@ def visit_hdtime(page: Page, timeout_ms: int, headless: bool) -> SiteResult:
         )
 
 
-def visit_haidan(page: Page, timeout_ms: int, headless: bool) -> SiteResult:
-    """Visit haidan.video and check login status."""
-    site_name = "海胆"
+def _handle_attendance(page: Page, site: dict, timeout_ms: int) -> SiteResult:
+    """处理签到页面访问（如 HDTime）。"""
+    site_name = site["name"]
+    attendance_url = site.get("attendance_url")
+    
+    if not attendance_url:
+        return SiteResult(
+            site_name=site_name,
+            url=site["url"],
+            success=False,
+            logged_in=True,
+            message="配置错误：缺少 attendance_url",
+            error="站点配置不完整",
+        )
+    
+    logging.info("%s: 已登录，访问签到页面...", site_name)
+    page.goto(attendance_url, timeout=timeout_ms, wait_until="domcontentloaded")
+    page.wait_for_load_state("networkidle", timeout=timeout_ms)
+    
+    logging.info("%s: 签到页面访问成功", site_name)
+    return SiteResult(
+        site_name=site_name,
+        url=attendance_url,
+        success=True,
+        logged_in=True,
+        message="已登录，签到页面访问成功",
+    )
+
+
+def _handle_button_click(page: Page, site: dict, timeout_ms: int) -> SiteResult:
+    """处理按钮点击操作（如海胆）。"""
+    site_name = site["name"]
+    site_url = site["url"]
+    button_id = site.get("button_id")
+    checked_text = site.get("checked_text", "")
+    
+    if not button_id:
+        return SiteResult(
+            site_name=site_name,
+            url=site_url,
+            success=False,
+            logged_in=True,
+            message="配置错误：缺少 button_id",
+            error="站点配置不完整",
+        )
+    
+    # Try to find the button and check its text
+    button = page.locator(f"#{button_id}")
     try:
-        logging.info("访问 %s...", HAIDAN_URL)
-        page.goto(HAIDAN_URL, timeout=timeout_ms, wait_until="domcontentloaded")
-        page.wait_for_load_state("networkidle", timeout=timeout_ms)
-        
-        # Check if logged in
-        logged_in = check_login_status(page)
-        
-        if not logged_in:
-            logging.info("%s: 未登录", site_name)
-            # Wait for manual login if in headed mode
-            logged_in = wait_for_manual_login(page, site_name, headless)
-            
-            if not logged_in:
-                return SiteResult(
-                    site_name=site_name,
-                    url=HAIDAN_URL,
-                    success=False if headless else True,
-                    logged_in=False,
-                    message="未登录" if headless else "等待登录超时",
-                    error="无头模式下无法登录" if headless else None,
-                )
-        
-        # Click modalBtn
-        logging.info("%s: 已登录，点击签到按钮...", site_name)
+        btn_count = button.count()
+    except Exception:
+        btn_count = 0
+    
+    if btn_count > 0:
+        # Read button text safely
+        btn_text = ""
         try:
-            button = page.locator(f"#{HAIDAN_BUTTON_ID}")
+            btn_text = button.get_attribute('value')
+        except Exception:
+            btn_text = ""
+        
+        if checked_text and btn_text == checked_text:
+            logging.info("%s: 已登录，按钮文本显示已打卡 (%s)", site_name, btn_text)
+            return SiteResult(
+                site_name=site_name,
+                url=site_url,
+                success=True,
+                logged_in=True,
+                message="已登录，已经打卡（通过按钮文本检测）",
+            )
+        
+        # Not already checked: try to click
+        logging.info("%s: 已登录，尝试点击签到按钮 (文本: %s)...", site_name, btn_text)
+        try:
             button.click(timeout=timeout_ms)
             page.wait_for_load_state("networkidle", timeout=timeout_ms)
             logging.info("%s: 签到按钮点击成功", site_name)
@@ -322,95 +481,108 @@ def visit_haidan(page: Page, timeout_ms: int, headless: bool) -> SiteResult:
         except Exception as btn_exc:
             logging.warning("%s: 签到按钮点击失败: %s", site_name, btn_exc)
             message = f"已登录，但签到按钮点击失败: {btn_exc}"
-        
+    else:
+        logging.warning("%s: 未找到签到按钮 (id=%s)", site_name, button_id)
+        message = "已登录，但未找到签到按钮"
+    
+    return SiteResult(
+        site_name=site_name,
+        url=site_url,
+        success=True,
+        logged_in=True,
+        message=message,
+    )
+
+
+def _handle_v2ex_daily_mission(page: Page, site: dict, timeout_ms: int) -> SiteResult:
+    """处理 V2EX 每日任务领取铜币。"""
+    site_name = site["name"]
+    mission_url = site.get("mission_url")
+    
+    if not mission_url:
         return SiteResult(
             site_name=site_name,
-            url=HAIDAN_URL,
-            success=True,
+            url=site["url"],
+            success=False,
             logged_in=True,
-            message=message,
+            message="配置错误：缺少 mission_url",
+            error="站点配置不完整",
         )
-        
-    except PlaywrightTimeout as exc:
-        error_msg = f"页面加载超时: {exc}"
-        logging.error("%s: %s", site_name, error_msg)
-        return SiteResult(
-            site_name=site_name,
-            url=HAIDAN_URL,
-            success=False,
-            logged_in=None,
-            message="访问失败",
-            error=error_msg,
-        )
-    except Exception as exc:
-        error_msg = f"访问出错: {exc}"
-        logging.error("%s: %s", site_name, error_msg)
-        return SiteResult(
-            site_name=site_name,
-            url=HAIDAN_URL,
-            success=False,
-            logged_in=None,
-            message="访问失败",
-            error=error_msg,
-        )
-
-
-def visit_mteam(page: Page, timeout_ms: int, headless: bool) -> SiteResult:
-    """Visit kp.m-team.cc/index."""
-    site_name = "M-Team"
+    
+    logging.info("%s: 已登录，访问每日任务页面...", site_name)
+    page.goto(mission_url, timeout=timeout_ms, wait_until="domcontentloaded")
+    page.wait_for_load_state("networkidle", timeout=timeout_ms)
+    
+    # 查找领取铜币的按钮
+    # 按钮特征：class="super normal button" 且 value 包含 "领取" 和 "铜币"
+    button_selector = 'input.button[type="button"][value*="领取"][value*="铜币"]'
+    
     try:
-        logging.info("访问 %s...", MTEAM_URL)
-        page.goto(MTEAM_URL, timeout=timeout_ms, wait_until="domcontentloaded")
-        page.wait_for_load_state("networkidle", timeout=timeout_ms)
-        
-        # Check if logged in
-        logged_in = check_login_status(page)
-        
-        if not logged_in:
-            logging.info("%s: 未登录", site_name)
-            # Wait for manual login if in headed mode
-            logged_in = wait_for_manual_login(page, site_name, headless)
+        button = page.locator(button_selector)
+        btn_count = button.count()
+    except Exception:
+        btn_count = 0
+    
+    if btn_count > 0:
+        # 获取按钮文本
+        try:
+            btn_value = button.get_attribute('value')
+            logging.info("%s: 找到铜币按钮: %s", site_name, btn_value)
             
-            if not logged_in:
+            # 检查是否已经领取过（按钮可能显示"明天再来"等）
+            if "已领取" in btn_value or "明天" in btn_value:
+                logging.info("%s: 今日已领取铜币", site_name)
                 return SiteResult(
                     site_name=site_name,
-                    url=MTEAM_URL,
-                    success=False if headless else True,
-                    logged_in=False,
-                    message="未登录" if headless else "等待登录超时",
-                    error="无头模式下无法登录" if headless else None,
+                    url=mission_url,
+                    success=True,
+                    logged_in=True,
+                    message=f"已登录，今日已领取铜币 ({btn_value})",
                 )
+            
+            # 点击领取按钮
+            logging.info("%s: 点击领取铜币按钮...", site_name)
+            button.click(timeout=timeout_ms)
+            page.wait_for_load_state("networkidle", timeout=timeout_ms)
+            
+            logging.info("%s: 铜币领取成功", site_name)
+            return SiteResult(
+                site_name=site_name,
+                url=mission_url,
+                success=True,
+                logged_in=True,
+                message="已登录，铜币领取成功",
+            )
+            
+        except Exception as btn_exc:
+            logging.warning("%s: 铜币领取失败: %s", site_name, btn_exc)
+            return SiteResult(
+                site_name=site_name,
+                url=mission_url,
+                success=True,
+                logged_in=True,
+                message=f"已登录，但铜币领取失败: {btn_exc}",
+            )
+    else:
+        # 未找到按钮，可能已经领取过
+        page_content = page.content()
+        if "每日登录奖励已领取" in page_content or "明天再来" in page_content:
+            logging.info("%s: 检测到今日已领取铜币", site_name)
+            return SiteResult(
+                site_name=site_name,
+                url=mission_url,
+                success=True,
+                logged_in=True,
+                message="已登录，今日已领取铜币（页面检测）",
+            )
         
-        logging.info("%s: 已登录，页面加载成功", site_name)
+        logging.warning("%s: 未找到铜币领取按钮", site_name)
         return SiteResult(
             site_name=site_name,
-            url=MTEAM_URL,
+            url=mission_url,
             success=True,
             logged_in=True,
-            message="已登录，页面加载成功",
-        )
-        
-    except PlaywrightTimeout as exc:
-        error_msg = f"页面加载超时: {exc}"
-        logging.error("%s: %s", site_name, error_msg)
-        return SiteResult(
-            site_name=site_name,
-            url=MTEAM_URL,
-            success=False,
-            logged_in=None,
-            message="访问失败",
-            error=error_msg,
-        )
-    except Exception as exc:
-        error_msg = f"访问出错: {exc}"
-        logging.error("%s: %s", site_name, error_msg)
-        return SiteResult(
-            site_name=site_name,
-            url=MTEAM_URL,
-            success=False,
-            logged_in=None,
-            message="访问失败",
-            error=error_msg,
+            message="已登录，但未找到铜币领取按钮",
         )
 
 
@@ -473,42 +645,46 @@ def send_ntfy_notification(ntfy_url: str, message: str) -> bool:
 
 def run_automation(config: Config) -> int:
     """Run browser automation workflow."""
-    results: list[SiteResult] = []
-    
     with sync_playwright() as playwright:
+        browser = None
         context = None
         try:
-            # Launch browser
-            context = launch_browser(config, playwright)
+            # Launch browser and context
+            browser, context = launch_browser_and_context(config, playwright)
             
-            # Get or create page
-            if context.pages:
-                page = context.pages[0]
+            # Run in appropriate mode
+            if not config.headless:
+                # Headed mode: wait for login and save state
+                return run_login_mode(context, config)
             else:
-                page = context.new_page()
-            
-            # Visit sites
-            results.append(visit_hdtime(page, config.timeout_ms, config.headless))
-            results.append(visit_haidan(page, config.timeout_ms, config.headless))
-            results.append(visit_mteam(page, config.timeout_ms, config.headless))
+                # Headless mode: run automation
+                if not config.state_file.exists():
+                    logging.error("❌ 状态文件不存在: %s", config.state_file)
+                    logging.error("请先使用 --headed 模式运行脚本以保存登录状态")
+                    return 2
+                
+                results = run_automation_mode(context, config)
+                
+                # Generate and send report
+                report = format_report(results)
+                logging.info("\n" + "=" * 60 + "\n%s\n" + "=" * 60, report)
+                
+                send_ntfy_notification(config.ntfy_url, report)
+                
+                # Return exit code based on success
+                all_success = all(r.success for r in results)
+                return 0 if all_success else 1
             
         except Exception as exc:
             logging.exception("浏览器自动化执行失败: %s", exc)
             return 1
         finally:
             if context:
-                logging.info("关闭浏览器...")
+                logging.info("关闭浏览器上下文...")
                 context.close()
-    
-    # Generate and send report
-    report = format_report(results)
-    logging.info("\n" + "=" * 60 + "\n%s\n" + "=" * 60, report)
-    
-    send_ntfy_notification(config.ntfy_url, report)
-    
-    # Return exit code based on success
-    all_success = all(r.success for r in results)
-    return 0 if all_success else 1
+            if browser:
+                logging.info("关闭浏览器...")
+                browser.close()
 
 
 def main(argv: list[str] | None = None) -> int:
