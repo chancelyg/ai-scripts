@@ -11,6 +11,9 @@ dependencies = [
     "httpx>=0.27.0",
     "playwright>=1.48.0",
     "schedule>=1.2.2",
+    "dotenv>=0.9.9",
+    "pyinstaller>=6.16.0",
+    "pysocks>=1.7.1",
     "telethon>=1.41.2",
 ]
 
