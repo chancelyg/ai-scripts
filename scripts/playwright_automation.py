@@ -21,7 +21,7 @@ PT 站点自动化浏览器脚本
 环境变量:
     PT_STATE_FILE: 浏览器状态文件路径，默认 .state.json
     PT_USER_DATA_DIR: 浏览器用户数据目录（仅有头模式），默认 .browser_data
-    PT_NTFY_URL: ntfy 通知服务 URL，默认 https://ntfy.chancel.me/signal
+    PT_NTFY_URL: ntfy 通知服务 URL，默认 https://ntfy.sh/signal
     PT_LOG_LEVEL: 日志级别，默认 INFO
     PT_HEADLESS: 是否无头模式，默认 true
     PT_TIMEOUT_MS: 页面加载超时时间（毫秒），默认 30000
@@ -53,7 +53,7 @@ from playwright.sync_api import sync_playwright, Browser, Page, TimeoutError as 
 
 DEFAULT_STATE_FILE = ".state.json"
 DEFAULT_USER_DATA_DIR = ".browser_data"
-DEFAULT_NTFY_URL = "https://ntfy.chancel.me/signal"
+DEFAULT_NTFY_URL = "https://ntfy.sh/signal"
 DEFAULT_LOG_LEVEL = "INFO"
 DEFAULT_HEADLESS = True
 DEFAULT_TIMEOUT_MS = 30000
@@ -135,7 +135,7 @@ def build_parser() -> argparse.ArgumentParser:
   %(prog)s  # 无头模式，使用保存的状态执行一次自动化
   %(prog)s --daemon  # 守护进程模式，定时执行签到
   %(prog)s --state-file /path/to/state.json
-  %(prog)s --ntfy-url https://ntfy.chancel.me/signal
+  %(prog)s --ntfy-url https://ntfy.sh/signal
         """
     )
     parser.add_argument("--state-file", help=f"浏览器状态文件路径 (默认: {DEFAULT_STATE_FILE})")
@@ -346,7 +346,7 @@ def visit_site(page: Page, site: dict, timeout_ms: int) -> SiteResult:
         page.goto(site_url, timeout=timeout_ms, wait_until="domcontentloaded")
         page.wait_for_load_state("networkidle", timeout=timeout_ms)
         
-        time.sleep(10)  # 等待额外加载
+        time.sleep(10) # 等待额外加载
         
         # Check if logged in
         logged_in = check_login_status(page, username)
@@ -677,14 +677,15 @@ def run_automation(config: Config) -> int:
                 
                 results = run_automation_mode(context, config)
                 
-                # Generate and send report
+                all_success = all(r.success for r in results)
                 report = format_report(results)
                 logging.info("\n" + "=" * 60 + "\n%s\n" + "=" * 60, report)
                 
-                send_ntfy_notification(config.ntfy_url, report)
+                if all_success:
+                    logging.info("所有站点访问成功，跳过通知推送")
+                else:
+                    send_ntfy_notification(config.ntfy_url, report)
                 
-                # Return exit code based on success
-                all_success = all(r.success for r in results)
                 return 0 if all_success else 1
             
         except Exception as exc:
