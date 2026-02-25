@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+# /// script
+# dependencies = [
+#   "httpx",
+# ]
+# ///
 """Download GitHub release assets for specified tags with hash verification.
 
 Usage examples:
@@ -91,7 +96,7 @@ def build_proxy_config() -> str | None:
     # But we can also explicitly set a proxy if needed
     http_proxy = os.getenv("HTTP_PROXY") or os.getenv("http_proxy")
     https_proxy = os.getenv("HTTPS_PROXY") or os.getenv("https_proxy")
-    
+
     # For GitHub API, we typically use HTTPS, so prioritize HTTPS proxy
     proxy = https_proxy or http_proxy
     return proxy
@@ -152,12 +157,14 @@ def get_release_by_tag(client: httpx.Client, repo: str, tag: str) -> dict | None
     """Get a specific release by tag name."""
     if tag == LATEST_TAG_ALIAS:
         return get_latest_release(client, repo)
-    
+
     url = f"{GITHUB_API_BASE}/repos/{repo}/releases/tags/{tag}"
     try:
         r = client.get(url, timeout=REQUEST_TIMEOUT)
         if r.status_code == 404:
-            logging.warning("Release with tag '%s' not found for repository %s", tag, repo)
+            logging.warning(
+                "Release with tag '%s' not found for repository %s", tag, repo
+            )
             return None
         if r.status_code == 403:
             raise RuntimeError(f"GitHub API rate limited or forbidden: {r.text[:200]}")
@@ -172,14 +179,16 @@ def has_latest_changed(latest_manifest_path: Path, current_latest_tag: str) -> b
     """Check if the latest release has changed since last download."""
     if not latest_manifest_path.is_file():
         return True
-    
+
     try:
         with latest_manifest_path.open("r", encoding="utf-8") as f:
             data = json.load(f)
         stored_latest = data.get("latest_tag")
         return stored_latest != current_latest_tag
     except Exception as exc:  # noqa: BLE001
-        logging.warning("Failed reading latest manifest %s: %s", latest_manifest_path, exc)
+        logging.warning(
+            "Failed reading latest manifest %s: %s", latest_manifest_path, exc
+        )
         return True
 
 
@@ -202,7 +211,9 @@ def should_skip_asset(dest: Path, size: int, force: bool) -> bool:
 def download_asset(client: httpx.Client, url: str, dest: Path) -> str:
     logging.info("Downloading %s -> %s", url, dest)
     hasher = hashlib.new(HASH_ALGO)
-    with client.stream("GET", url, follow_redirects=True, timeout=REQUEST_TIMEOUT) as resp:
+    with client.stream(
+        "GET", url, follow_redirects=True, timeout=REQUEST_TIMEOUT
+    ) as resp:
         resp.raise_for_status()
         dest.parent.mkdir(parents=True, exist_ok=True)
         with dest.open("wb") as f:
@@ -219,7 +230,9 @@ def download_asset(client: httpx.Client, url: str, dest: Path) -> str:
             verify_hasher.update(block)
     verify_hash = verify_hasher.hexdigest()
     if stream_hash != verify_hash:
-        raise IOError(f"Hash mismatch for {dest} (stream {stream_hash} != verify {verify_hash})")
+        raise IOError(
+            f"Hash mismatch for {dest} (stream {stream_hash} != verify {verify_hash})"
+        )
     logging.info("Verified %s %s=%s", dest.name, HASH_ALGO, stream_hash)
     # Write sidecar hash file
     hash_file = dest.with_suffix(dest.suffix + f".{HASH_ALGO}")
@@ -239,28 +252,28 @@ def process_release_assets(
     records: List[AssetRecord] = []
     tag = release.get("tag_name")
     rel_id = release.get("id")
-    
+
     logging.info("Processing release tag=%s id=%s", tag, rel_id)
-    
+
     rel_dir = download_dir / repo.split("/")[0] / repo.split("/")[1] / tag
     assets = release.get("assets") or []
-    
+
     if not assets:
         logging.info("Release %s has no assets", tag)
         return records
-    
+
     for asset in assets:
         asset_name = asset.get("name")
         size = asset.get("size", 0)
         asset_id = asset.get("id")
         download_url = asset.get("browser_download_url")
-        
+
         if not download_url:
             logging.warning("Skip asset without download URL: %s", asset_name)
             continue
-            
+
         dest_path = rel_dir / asset_name
-        
+
         if should_skip_asset(dest_path, size, force_download):
             # Compute hash for existing file if sidecar missing.
             hash_file = dest_path.with_suffix(dest_path.suffix + f".{HASH_ALGO}")
@@ -284,13 +297,13 @@ def process_release_assets(
                 )
             )
             continue
-            
+
         try:
             hash_value = download_asset(client, download_url, dest_path)
         except Exception as exc:  # noqa: BLE001
             logging.error("Failed downloading %s: %s", asset_name, exc)
             continue
-            
+
         records.append(
             AssetRecord(
                 repo=repo,
@@ -305,7 +318,7 @@ def process_release_assets(
                 path=str(dest_path),
             )
         )
-    
+
     return records
 
 
@@ -319,21 +332,21 @@ def process_specified_tags(
     """Process releases for specified tags."""
     records: List[AssetRecord] = []
     latest_manifest_path = download_dir / f".{repo.replace('/', '_')}_latest.json"
-    
+
     for tag in tags:
         if tag == LATEST_TAG_ALIAS:
             release = get_latest_release(client, repo)
             if not release:
                 logging.warning("Could not get latest release for %s", repo)
                 continue
-                
+
             actual_tag = release.get("tag_name")
             logging.info("Latest release tag: %s", actual_tag)
-            
+
             # Check if latest has changed
             latest_changed = has_latest_changed(latest_manifest_path, actual_tag)
             force_download = force_latest or latest_changed
-            
+
             if latest_changed:
                 logging.info("Latest release has changed, will download")
                 save_latest_tag(latest_manifest_path, actual_tag)
@@ -341,19 +354,19 @@ def process_specified_tags(
                 logging.info("Force latest flag enabled, will re-download")
             else:
                 logging.info("Latest release unchanged, checking existing files")
-                
+
         else:
             release = get_release_by_tag(client, repo, tag)
             if not release:
                 logging.warning("Could not get release for tag %s", tag)
                 continue
             force_download = False
-            
+
         release_records = process_release_assets(
             client, repo, release, download_dir, force_download
         )
         records.extend(release_records)
-    
+
     return records
 
 
@@ -367,8 +380,12 @@ def compute_hash(path: Path) -> str:
 
 # --------------------------------- CLI & Main ----------------------------------
 def parse_args(argv: List[str]) -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Download GitHub release assets for specified tags with hash verification.")
-    p.add_argument("--repo", required=True, help="GitHub repository (owner/name or full URL)")
+    p = argparse.ArgumentParser(
+        description="Download GitHub release assets for specified tags with hash verification."
+    )
+    p.add_argument(
+        "--repo", required=True, help="GitHub repository (owner/name or full URL)"
+    )
     p.add_argument(
         "--tags",
         nargs="+",
@@ -400,17 +417,23 @@ def main(argv: List[str] | None = None) -> int:
     download_dir = Path(args.download_dir).expanduser().resolve()
     manifest_path = download_dir / MANIFEST_FILENAME
 
-    logging.info("Repo=%s tags=%s force_latest=%s dest=%s", repo, args.tags, args.force_latest, download_dir)
+    logging.info(
+        "Repo=%s tags=%s force_latest=%s dest=%s",
+        repo,
+        args.tags,
+        args.force_latest,
+        download_dir,
+    )
 
     headers = build_headers()
     proxy = build_proxy_config()
     transport = httpx.HTTPTransport(retries=3)
-    
+
     client_kwargs = {"headers": headers, "transport": transport}
     if proxy:
         logging.info("Using proxy: %s", proxy)
         client_kwargs["proxy"] = proxy
-    
+
     with httpx.Client(**client_kwargs) as client:
         try:
             records = process_specified_tags(

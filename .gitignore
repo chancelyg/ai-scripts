@@ -213,4 +213,4 @@ __marimo__/
 # Other files to ignore
 .browser_data/
 .state.json
-
+.agent/
